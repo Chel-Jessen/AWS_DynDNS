@@ -9,27 +9,45 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/route53"
 	"io"
+	"log"
 	"net/http"
-	"time"
 )
 
-func getExternalIP() string {
+func getExternalIP() (string, error) {
 	type IP struct {
 		Ip string `json:"origin"`
 	}
-	resp, _ := http.Get("http://httpbin.org/ip")
-	body, _ := io.ReadAll(resp.Body)
+
+	resp, err := http.Get("http://httpbin.org/ip")
+	if err != nil {
+		return "", fmt.Errorf("could not get external IP: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("could not read response body: %v", err)
+	}
+
 	var ip IP
-	_ = json.Unmarshal(body, &ip)
-	return ip.Ip
+	if err := json.Unmarshal(body, &ip); err != nil {
+		return "", fmt.Errorf("could not unmarshal JSON: %v", err)
+	}
+
+	return ip.Ip, nil
 }
 
-func updateRecord(accessKey string, secretKey string, hostedZoneID string, domainName string, subdomain string, region string) error {
-	var ip = getExternalIP()
-	println("Current IP: ", ip)
+func updateRecord(accessKey, secretKey, hostedZoneID, domainName, subdomain, region string) error {
+	ip, err := getExternalIP()
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Current IP: %s\n", ip)
+
 	creds := credentials.NewStaticCredentials(accessKey, secretKey, "")
 	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(region), // Change to your desired region
+		Region:      aws.String(region),
 		Credentials: creds,
 	})
 	if err != nil {
@@ -53,20 +71,22 @@ func updateRecord(accessKey string, secretKey string, hostedZoneID string, domai
 	}
 
 	if len(output.ResourceRecordSets) == 0 || *output.ResourceRecordSets[0].Name != recordName {
-		return fmt.Errorf("could not find A record for subdomain %s", subdomain)
+		return fmt.Errorf("could not find A record for subdomain %s\n", subdomain)
 	}
-	var oldIP string
 
+	var oldIP string
 	for _, rr := range output.ResourceRecordSets {
 		if *rr.Name == recordName && *rr.Type == "A" && len(rr.ResourceRecords) > 0 {
 			oldIP = *rr.ResourceRecords[0].Value
 			break
 		}
 	}
+
 	if oldIP == ip {
-		println("IP is up to date")
+		log.Printf("IP is up to date\n")
 		return nil
 	}
+
 	// Update the record
 	record := output.ResourceRecordSets[0]
 	record.TTL = aws.Int64(300)
@@ -104,27 +124,22 @@ func main() {
 	var domainName string
 	var subdomain string
 	var region string
-	var secs int
 
 	flag.StringVar(&accessKey, "accessKey", "", "AWS Access Key")
-	flag.StringVar(&accessKey, "a", "", "AWS Access Key")
 	flag.StringVar(&secretKey, "secretKey", "", "AWS Secret Key")
-	flag.StringVar(&secretKey, "s", "", "AWS Secret Key")
 	flag.StringVar(&hostedZoneID, "hostedZoneID", "", "Hosted Zone ID")
-	flag.StringVar(&hostedZoneID, "hz", "", "Hosted Zone ID")
 	flag.StringVar(&domainName, "domain", "", "Domain Name")
 	flag.StringVar(&subdomain, "subdomain", "", "Subdomain")
 	flag.StringVar(&region, "region", "us-east-1", "Region")
-	flag.IntVar(&secs, "sec", 300, "Subdomain")
-
 	flag.Parse()
 
-	for {
-		err := updateRecord(accessKey, secretKey, hostedZoneID, domainName, subdomain, region)
-		if err != nil {
-			println(err)
-			return
-		}
-		time.Sleep(time.Second * time.Duration(secs))
+	if accessKey == "" || secretKey == "" || hostedZoneID == "" || domainName == "" || subdomain == "" {
+		log.Println("Missing Arguments")
+		return
+	}
+
+	err := updateRecord(accessKey, secretKey, hostedZoneID, domainName, subdomain, region)
+	if err != nil {
+		log.Println(err)
 	}
 }
